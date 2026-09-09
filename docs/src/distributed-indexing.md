@@ -266,6 +266,13 @@ def vector_search(
 
 The function returns a `pyarrow.Table` containing the global top-k rows sorted by `_distance`. If `analyze_plan=True`, it returns a `str` containing one Lance scanner analysis section per planned shard.
 
+Indexed and unindexed candidates use the same distance convention as Lance:
+L2 is squared Euclidean distance (`sum((q - v) ** 2)`), cosine is
+`1 - cosine_similarity(q, v)`, and dot is `1 - dot(q, v)`. All are sorted in
+ascending order. If `nearest["metric"]` is omitted, flat fallback plans use the
+selected index's metric; when no index exists, the default is L2. Approximate
+index scores can still differ from exact flat-search distances.
+
 ## Examples
 
 ### FTS Index (Scalar)

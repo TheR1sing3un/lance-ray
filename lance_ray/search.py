@@ -393,6 +393,27 @@ def _get_nearest_metric(nearest: dict[str, Any]) -> str:
     return str(metric).lower()
 
 
+def _get_index_metric(dataset: LanceDataset, vector_index: Any) -> str:
+    # Recent index metadata records the metric without opening the index files.
+    details = _index_value(vector_index, "details") or {}
+    metric = details.get("metric_type")
+    if metric:
+        return str(metric).lower()
+
+    # Older persisted indexes may not have a metric in their manifest details.
+    name = _index_value(vector_index, "name")
+    statistics = dataset.stats.index_stats(name)
+    metrics = {
+        str(segment.get("metric_type") or "").lower()
+        for segment in statistics.get("indices", [])
+    }
+    if len(metrics) != 1 or "" in metrics:
+        raise ValueError(
+            f"Cannot determine a consistent distance metric for vector index {name!r}"
+        )
+    return metrics.pop()
+
+
 def _compute_vector_distances(
     vector_column: pa.ChunkedArray[Any],
     query: Any,
@@ -411,7 +432,8 @@ def _compute_vector_distances(
         )
 
     if metric in ("l2", "euclidean"):
-        return np.linalg.norm(matrix - query_vector, axis=1).astype(np.float32)
+        # Lance returns squared L2, including on the indexed search path.
+        return np.sum((matrix - query_vector) ** 2, axis=1).astype(np.float32)
     if metric == "cosine":
         query_norm = np.linalg.norm(query_vector)
         row_norms = np.linalg.norm(matrix, axis=1)
@@ -424,7 +446,8 @@ def _compute_vector_distances(
         )
         return (1.0 - similarities).astype(np.float32)
     if metric in ("dot", "ip", "inner_product"):
-        return (-(matrix @ query_vector)).astype(np.float32)
+        # Preserve Lance's offset so indexed and flat candidates are comparable.
+        return (1.0 - matrix @ query_vector).astype(np.float32)
     if metric == "hamming":
         return np.count_nonzero(matrix != query_vector, axis=1).astype(np.float32)
 
@@ -556,6 +579,9 @@ def vector_search(
             and ``k``.  The worker-side ``k`` is raised to at least
             ``k * oversample_factor`` before the driver performs the final
             global top-k merge.
+            If ``metric`` is omitted, fallback plans use the selected index's
+            metric, or L2 when no index exists.  L2 distances are squared and
+            dot distances are ``1 - dot(q, v)``, matching Lance.
         index_name: Optional vector index name to use.  If specified and the
             index cannot be found, ``ValueError`` is raised.  If omitted,
             Lance-Ray uses the first vector index covering ``nearest["column"]``.
@@ -674,6 +700,15 @@ def vector_search(
     )
     if not plans:
         return pa.table({})
+
+    if (
+        vector_index is not None
+        and not (nearest.get("metric") or nearest.get("distance_type"))
+        and any(not plan.index_segments for plan in plans)
+    ):
+        # Lance infers the index metric for ANN queries. Use the same metric
+        # on flat shards before comparing their distances in the global merge.
+        nearest = {**nearest, "metric": _get_index_metric(dataset, vector_index)}
 
     pickled_dataset = pickle.dumps(dataset)
 

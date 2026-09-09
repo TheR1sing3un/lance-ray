@@ -277,7 +277,7 @@ def test_execute_fallback_vector_search_plan_computes_local_top_k(
     assert scanner_options["columns"] == ["id", "vector"]
     assert isinstance(result, pa.Table)
     assert result.column("id").to_pylist() == [2, 3]
-    assert result.column("_distance").to_pylist() == [1.0, 2.0]
+    assert result.column("_distance").to_pylist() == [1.0, 4.0]
     assert "vector" not in result.column_names
 
 
