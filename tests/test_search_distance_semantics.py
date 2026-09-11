@@ -10,6 +10,7 @@ from typing import Any
 import lance
 import pyarrow as pa
 import pytest
+from lance_ray import search as search_mod
 from lance_ray.pool import clear_global_pool, init_global_pool
 from lance_ray.search import _compute_vector_distances, _get_index_metric, vector_search
 
@@ -169,6 +170,41 @@ def test_get_index_metric_uses_manifest_details(as_dict: bool) -> None:
     values = {"name": "vector_idx", "details": {"metric_type": "COSINE"}}
     index = values if as_dict else SimpleNamespace(**values)
     assert _get_index_metric(dataset, index) == "cosine"
+
+
+@pytest.mark.parametrize("analyze_plan", [True, False])
+def test_mixed_search_only_resolves_metric_for_distance_computation(
+    tmp_path: Path,
+    search_pool: None,
+    monkeypatch: pytest.MonkeyPatch,
+    analyze_plan: bool,
+) -> None:
+    uri = tmp_path / "analyze.lance"
+    dataset = lance.write_dataset(_table(list(range(256)), [[1.0, 0.0]] * 256), uri)
+    dataset.create_index(
+        "vector", index_type="IVF_FLAT", metric="cosine", num_partitions=1
+    )
+    dataset = lance.write_dataset(_table([256], [[0.8, 0.6]]), uri, mode="append")
+    calls = []
+
+    def unavailable_metric(dataset: Any, index: Any) -> str:
+        calls.append(index)
+        raise ValueError("legacy metric metadata unavailable")
+
+    monkeypatch.setattr(search_mod, "_get_index_metric", unavailable_metric)
+    nearest = {"column": "vector", "q": [1.0, 0.0], "k": 1}
+    if analyze_plan:
+        result = vector_search(
+            dataset, nearest=nearest, columns=["id"], num_workers=2, analyze_plan=True
+        )
+        assert isinstance(result, str)
+        assert "(indexed)" in result
+        assert "(flat_fallback)" in result
+        assert calls == []
+    else:
+        with pytest.raises(ValueError, match="legacy metric metadata unavailable"):
+            vector_search(dataset, nearest=nearest, columns=["id"], num_workers=2)
+        assert len(calls) == 1
 
 
 def test_get_index_metric_reads_stats_for_legacy_index() -> None:

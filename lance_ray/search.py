@@ -608,9 +608,10 @@ def vector_search(
             Ignored when ``fast_search=True``.
         fast_search: Search only indexed data.  When enabled, Lance-Ray does
             not schedule flat-search fallback plans for unindexed fragments.
-        analyze_plan: Return Lance scanner analyze plans instead of executing
-            the query and returning a table.  The result is a string containing
-            one section per planned shard.
+        analyze_plan: Execute Lance scanner analyze plans and return runtime
+            metrics instead of a result table.  The result has one section per
+            planned shard.  This skips Lance-Ray's fallback distance computation
+            and global top-k merge, but still executes the underlying scanners.
         scanner_options: Additional Lance scanner options.  Lance-Ray manages
             ``nearest``, ``fragments``, ``index_segments``, ``fast_search``,
             ``limit``, and ``offset`` internally, so these options cannot be
@@ -702,12 +703,14 @@ def vector_search(
         return pa.table({})
 
     if (
-        vector_index is not None
+        not analyze_plan
+        and vector_index is not None
         and not (nearest.get("metric") or nearest.get("distance_type"))
         and any(not plan.index_segments for plan in plans)
     ):
         # Lance infers the index metric for ANN queries. Use the same metric
         # on flat shards before comparing their distances in the global merge.
+        # Plan analysis returns before computing fallback distances.
         nearest = {**nearest, "metric": _get_index_metric(dataset, vector_index)}
 
     pickled_dataset = pickle.dumps(dataset)
